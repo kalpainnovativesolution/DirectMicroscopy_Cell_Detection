@@ -52,7 +52,7 @@ st.sidebar.header("Settings")
 default_model_drive_url = get_secret_value("MODEL_DRIVE_URL", "")
 
 model_drive_url = st.sidebar.text_input(
-    "https://drive.google.com/file/d/1vZE7iE2Vtxhb3JnxHBJFox5HLBPyajBb/view?usp=sharing",
+    "https://drive.google.com/file/d/12wztvmmRL5BIo6U3on3GtKWQFQa36CpN/view?usp=drive_link",
     value=default_model_drive_url,
     help="Paste the public Google Drive link of your YOLO .pt model file."
 )
