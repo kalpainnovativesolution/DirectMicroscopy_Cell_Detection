@@ -4,40 +4,57 @@ import numpy as np
 import pandas as pd
 import re
 import os
+import hashlib
+from pathlib import Path
 from ultralytics import YOLO
+import gdown
 
-# ──────────────────────────────────────────────────────────────────────────────
+
+# ---------------------------------------------------------------------
 # Page Config
-# ──────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------
 st.set_page_config(
     page_title="Cell Detection App",
     page_icon="🔬",
     layout="wide"
 )
 
-st.title("🔬 Cell Detection with YOLOv11")
+st.title("Cell Detection with YOLOv11")
+
 st.markdown(
-    "Upload two image folders. The app will automatically sort images by "
-    "filename, select the first 25 images from each folder, detect cells, "
-    "display results, save predicted bounding-box images to the output folder, "
-    "and calculate Somatic Cells/ml."
+    """
+    Upload two image folders. The app will automatically sort images by filename, 
+    select the first 25 images from each folder, detect cells, display results, 
+    and calculate Somatic Cells/ml.
+    """
 )
 
-# ──────────────────────────────────────────────────────────────────────────────
+
+# ---------------------------------------------------------------------
+# Config Helpers
+# ---------------------------------------------------------------------
+def get_secret_value(key, default=""):
+    """
+    Safely read value from Streamlit secrets.
+    Works locally and on Streamlit Cloud.
+    """
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
+
+
+# ---------------------------------------------------------------------
 # Sidebar Settings
-# ──────────────────────────────────────────────────────────────────────────────
-st.sidebar.header("⚙️ Settings")
+# ---------------------------------------------------------------------
+st.sidebar.header("Settings")
 
-model_path = st.sidebar.text_input(
-    "Model Path",
-    value="best.pt",
-    help="Path to your trained YOLO .pt weights file"
-)
+default_model_drive_url = get_secret_value("MODEL_DRIVE_URL", "")
 
-output_base_dir = st.sidebar.text_input(
-    "Output Folder Path",
-    value="predicted_outputs",
-    help="Folder where predicted bounding-box images will be saved"
+model_drive_url = st.sidebar.text_input(
+    "Google Drive Model Link",
+    value=default_model_drive_url,
+    help="Paste the public Google Drive link of your YOLO .pt model file."
 )
 
 conf_threshold = st.sidebar.slider(
@@ -49,7 +66,7 @@ conf_threshold = st.sidebar.slider(
 )
 
 iou_threshold = st.sidebar.slider(
-    "IoU Threshold (NMS)",
+    "IoU Threshold",
     min_value=0.1,
     max_value=1.0,
     value=0.45,
@@ -65,23 +82,54 @@ img_size = 640
 max_files_per_group = 25
 allowed_extensions = {"jpg", "jpeg", "png", "bmp", "tiff", "tif"}
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Load Model
-# ──────────────────────────────────────────────────────────────────────────────
-@st.cache_resource
-def load_model(path):
-    return YOLO(path)
+
+# ---------------------------------------------------------------------
+# Model Download and Load
+# ---------------------------------------------------------------------
+@st.cache_resource(show_spinner=False)
+def download_and_load_model(drive_url):
+    """
+    Downloads YOLO model from Google Drive and loads it.
+    The downloaded model is cached by Streamlit.
+    """
+
+    if not drive_url or not drive_url.strip():
+        raise ValueError("Google Drive model link is missing.")
+
+    model_dir = Path("models")
+    model_dir.mkdir(exist_ok=True)
+
+    url_hash = hashlib.md5(drive_url.encode()).hexdigest()[:10]
+    model_path = model_dir / f"yolo_model_{url_hash}.pt"
+
+    if not model_path.exists() or model_path.stat().st_size == 0:
+        downloaded_file = gdown.download(
+            url=drive_url,
+            output=str(model_path),
+            quiet=False,
+            fuzzy=True
+        )
+
+        if downloaded_file is None or not model_path.exists():
+            raise RuntimeError(
+                "Model download failed. Please check whether the Google Drive link is public."
+            )
+
+    return YOLO(str(model_path))
+
 
 try:
-    model = load_model(model_path)
-    st.sidebar.success("✅ Model loaded successfully!")
+    with st.spinner("Loading YOLO model..."):
+        model = download_and_load_model(model_drive_url)
+    st.sidebar.success("Model loaded successfully.")
 except Exception as e:
-    st.sidebar.error(f"❌ Failed to load model: {e}")
+    st.sidebar.error(f"Failed to load model: {e}")
     st.stop()
 
-# ──────────────────────────────────────────────────────────────────────────────
+
+# ---------------------------------------------------------------------
 # Helper Functions
-# ──────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------
 def resize_image(image_np, size=(640, 640)):
     return cv2.resize(image_np, size, interpolation=cv2.INTER_AREA)
 
@@ -95,17 +143,18 @@ def natural_sort_key(text):
 
 def get_source_folder_name(file_path):
     """
-    Extract the top-level folder name from uploaded file path.
+    Extract top-level folder name from uploaded file path.
     Example:
-    'sampleA/img1.jpg' -> 'sampleA'
-    'sampleA/sub/img1.jpg' -> 'sampleA'
-    'img1.jpg' -> 'root_folder'
+    sampleA/img1.jpg -> sampleA
+    sampleA/sub/img1.jpg -> sampleA
+    img1.jpg -> root_folder
     """
     normalized = file_path.replace("\\", "/").strip("/")
     parts = normalized.split("/")
 
     if len(parts) >= 2:
         return parts[0]
+
     return "root_folder"
 
 
@@ -116,10 +165,10 @@ def get_filename_only(file_path):
 def filter_and_select_first_25(uploaded_files, max_count=25):
     valid_files = []
 
-    for f in uploaded_files:
-        ext = f.name.split(".")[-1].lower() if "." in f.name else ""
+    for file in uploaded_files:
+        ext = file.name.split(".")[-1].lower() if "." in file.name else ""
         if ext in allowed_extensions:
-            valid_files.append(f)
+            valid_files.append(file)
 
     valid_files = sorted(valid_files, key=lambda x: natural_sort_key(x.name))
     selected_files = valid_files[:max_count]
@@ -129,6 +178,7 @@ def filter_and_select_first_25(uploaded_files, max_count=25):
 
 def read_uploaded_image(uploaded_file):
     uploaded_file.seek(0)
+
     file_bytes = np.frombuffer(uploaded_file.read(), np.uint8)
     bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
@@ -143,7 +193,7 @@ def draw_detections(image_np, results, box_hex, show_lbl=False, show_cf=False):
     output = image_np.copy()
 
     hex_color = box_hex.lstrip("#")
-    r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+    r, g, b = tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
     color_bgr = (b, g, r)
 
     detections_by_class = {}
@@ -160,21 +210,25 @@ def draw_detections(image_np, results, box_hex, show_lbl=False, show_cf=False):
 
             detections_by_class[label] = detections_by_class.get(label, 0) + 1
 
-            # Draw bounding box
             cv2.rectangle(output, (x1, y1), (x2, y2), color_bgr, 2)
 
-            # Optionally draw text only for app display
             if show_lbl or show_cf:
                 text_parts = []
+
                 if show_lbl:
                     text_parts.append(label)
+
                 if show_cf:
                     text_parts.append(f"{conf:.2f}")
+
                 text = " ".join(text_parts)
 
                 if text.strip():
                     (tw, th), _ = cv2.getTextSize(
-                        text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1
+                        text,
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.55,
+                        1
                     )
 
                     label_y1 = max(y1 - th - 8, 0)
@@ -189,6 +243,7 @@ def draw_detections(image_np, results, box_hex, show_lbl=False, show_cf=False):
                     )
 
                     text_y = max(y1 - 4, th + 2)
+
                     cv2.putText(
                         output,
                         text,
@@ -203,32 +258,9 @@ def draw_detections(image_np, results, box_hex, show_lbl=False, show_cf=False):
     return output, detections_by_class
 
 
-def sanitize_filename(filename):
-    base_name = os.path.basename(filename.replace("\\", "/"))
-    name, ext = os.path.splitext(base_name)
-    safe_name = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", name)
-
-    if ext.lower() not in [".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"]:
-        ext = ".jpg"
-
-    return safe_name + ext
-
-
-def save_output_image(output_rgb, save_dir, original_filename):
-    os.makedirs(save_dir, exist_ok=True)
-
-    safe_filename = sanitize_filename(original_filename)
-    name, _ = os.path.splitext(safe_filename)
-    save_path = os.path.join(save_dir, f"{name}_pred.jpg")
-
-    output_bgr = cv2.cvtColor(output_rgb, cv2.COLOR_RGB2BGR)
-    success = cv2.imwrite(save_path, output_bgr)
-
-    return save_path if success else None
-
-
-def process_single_image(uploaded_file, base_save_dir):
+def process_single_image(uploaded_file):
     raw_original_rgb = read_uploaded_image(uploaded_file)
+
     if raw_original_rgb is None:
         return None
 
@@ -245,7 +277,6 @@ def process_single_image(uploaded_file, base_save_dir):
         verbose=False
     )
 
-    # App display image with optional labels/conf
     display_image, detections_by_class = draw_detections(
         resized_rgb,
         results,
@@ -254,19 +285,7 @@ def process_single_image(uploaded_file, base_save_dir):
         show_conf
     )
 
-    # Saved image with only bounding boxes
-    save_only_boxes_image, _ = draw_detections(
-        resized_rgb,
-        results,
-        box_color,
-        show_lbl=False,
-        show_cf=False
-    )
-
     total_cells = sum(detections_by_class.values())
-
-    save_dir = os.path.join(base_save_dir, source_folder_name)
-    saved_path = save_output_image(save_only_boxes_image, save_dir, image_name_only)
 
     return {
         "filename": image_name_only,
@@ -275,20 +294,19 @@ def process_single_image(uploaded_file, base_save_dir):
         "raw_original_rgb": raw_original_rgb,
         "resized_rgb": resized_rgb,
         "display_image": display_image,
-        "saved_output_image": save_only_boxes_image,
         "detections_by_class": detections_by_class,
-        "total_cells": total_cells,
-        "saved_path": saved_path
+        "total_cells": total_cells
     }
 
 
-def process_image_group(uploaded_files, group_name, base_save_dir):
+def process_image_group(uploaded_files, group_name):
     processed_results = []
     group_class_counts = {}
     group_total_cells = 0
 
     for uploaded_file in uploaded_files:
-        result = process_single_image(uploaded_file, base_save_dir)
+        result = process_single_image(uploaded_file)
+
         if result is None:
             continue
 
@@ -311,6 +329,7 @@ def make_class_dataframe(class_counts, total_cells):
         return pd.DataFrame(columns=["Class", "Count", "% of Total"])
 
     rows = []
+
     for cls_name, count in class_counts.items():
         percent = (count / total_cells) * 100
         rows.append((cls_name, count, f"{percent:.1f}%"))
@@ -320,23 +339,23 @@ def make_class_dataframe(class_counts, total_cells):
 
 def make_image_summary_dataframe(processed_results):
     rows = []
+
     for i, result in enumerate(processed_results, start=1):
         rows.append({
             "S.No.": i,
             "Source Folder": result["source_folder_name"],
             "Image Name": result["filename"],
-            "Total Cells": result["total_cells"],
-            "Saved Path": result["saved_path"] if result["saved_path"] else "Not Saved"
+            "Total Cells": result["total_cells"]
         })
 
     return pd.DataFrame(rows)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------
 # Uploaders
-# ──────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------
 st.markdown("---")
-st.subheader("📁 Upload Image Folders")
+st.subheader("Upload Image Folders")
 
 st.caption(
     "Choose folders here. The app will sort images by filename and process "
@@ -352,16 +371,17 @@ left_to_right_files = st.file_uploader(
 )
 
 top_to_bottom_files = st.file_uploader(
-    "Select Top to bottom images folder",
+    "Select top to bottom images folder",
     type=list(allowed_extensions),
     accept_multiple_files="directory",
     key="top_to_bottom_folder_uploader",
     help="Select a folder. The app will sort images by filename and use the first 25 images."
 )
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Select first 25 automatically
-# ──────────────────────────────────────────────────────────────────────────────
+
+# ---------------------------------------------------------------------
+# Select First 25 Automatically
+# ---------------------------------------------------------------------
 selected_left_files = []
 selected_top_files = []
 total_left_uploaded_valid = 0
@@ -369,20 +389,23 @@ total_top_uploaded_valid = 0
 
 if left_to_right_files:
     selected_left_files, total_left_uploaded_valid = filter_and_select_first_25(
-        left_to_right_files, max_files_per_group
+        left_to_right_files,
+        max_files_per_group
     )
 
 if top_to_bottom_files:
     selected_top_files, total_top_uploaded_valid = filter_and_select_first_25(
-        top_to_bottom_files, max_files_per_group
+        top_to_bottom_files,
+        max_files_per_group
     )
 
-# ──────────────────────────────────────────────────────────────────────────────
+
+# ---------------------------------------------------------------------
 # Selected Image Summary
-# ──────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------
 if left_to_right_files or top_to_bottom_files:
     st.markdown("---")
-    st.subheader("📌 Selected Image Summary")
+    st.subheader("Selected Image Summary")
 
     col_a, col_b = st.columns(2)
 
@@ -390,60 +413,60 @@ if left_to_right_files or top_to_bottom_files:
         st.write("**Left to Right Folder**")
         st.write(f"Valid uploaded images found: {total_left_uploaded_valid}")
         st.write(f"Images selected for processing: {len(selected_left_files)}")
+
         if selected_left_files:
             left_folder_name = get_source_folder_name(selected_left_files[0].name)
             st.write(f"**Source folder name:** {left_folder_name}")
+
         if total_left_uploaded_valid > max_files_per_group:
             st.info(
                 f"Only the first {max_files_per_group} images after filename sorting are being processed."
             )
+
         if selected_left_files:
             st.write("**Selected filenames:**")
-            st.write([get_filename_only(f.name) for f in selected_left_files])
+            st.write([get_filename_only(file.name) for file in selected_left_files])
 
     with col_b:
         st.write("**Top to Bottom Folder**")
         st.write(f"Valid uploaded images found: {total_top_uploaded_valid}")
         st.write(f"Images selected for processing: {len(selected_top_files)}")
+
         if selected_top_files:
             top_folder_name = get_source_folder_name(selected_top_files[0].name)
             st.write(f"**Source folder name:** {top_folder_name}")
+
         if total_top_uploaded_valid > max_files_per_group:
             st.info(
                 f"Only the first {max_files_per_group} images after filename sorting are being processed."
             )
+
         if selected_top_files:
             st.write("**Selected filenames:**")
-            st.write([get_filename_only(f.name) for f in selected_top_files])
+            st.write([get_filename_only(file.name) for file in selected_top_files])
 
-# ──────────────────────────────────────────────────────────────────────────────
+
+# ---------------------------------------------------------------------
 # Main Processing
-# ──────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------
 if selected_left_files or selected_top_files:
-    if not output_base_dir.strip():
-        st.error("❌ Please enter a valid Output Folder Path in the sidebar.")
-        st.stop()
 
-    left_save_dir = os.path.join(output_base_dir, "left_to_right")
-    top_save_dir = os.path.join(output_base_dir, "top_to_bottom")
-
-    with st.spinner("🔍 Running inference on selected images and saving predictions..."):
+    with st.spinner("Running inference on selected images..."):
         left_group_data = process_image_group(
             selected_left_files,
-            "Left to Right",
-            left_save_dir
+            "Left to Right"
         )
+
         top_group_data = process_image_group(
             selected_top_files,
-            "Top to Bottom",
-            top_save_dir
+            "Top to Bottom"
         )
 
     total_left_cells = left_group_data["group_total_cells"]
     total_top_cells = top_group_data["group_total_cells"]
     grand_total_cells = total_left_cells + total_top_cells
 
-    # Somatic Cells/ml formula
+    # Somatic Cells/ml formula:
     # (Combined Total Cells / 50) * 333300
     somatic_cells_per_ml = (grand_total_cells / 50) * 333300
 
@@ -456,74 +479,80 @@ if selected_left_files or selected_top_files:
         combined_class_counts[cls_name] = combined_class_counts.get(cls_name, 0) + count
 
     st.markdown("---")
-    st.subheader("💾 Prediction Save Location")
-    st.write(f"**Base Output Folder:** `{output_base_dir}`")
-    st.write(f"**Left to Right Predictions Root:** `{left_save_dir}`")
-    st.write(f"**Top to Bottom Predictions Root:** `{top_save_dir}`")
-    st.caption("Inside each root folder, images are saved under their uploaded source folder name.")
-
-    st.markdown("---")
-    st.subheader("📊 Final Summation")
+    st.subheader("Final Summation")
 
     m1, m2, m3, m4 = st.columns(4)
+
     with m1:
         st.metric("Left to Right Total Cells", total_left_cells)
+
     with m2:
         st.metric("Top to Bottom Total Cells", total_top_cells)
+
     with m3:
         st.metric("Combined Total Cells", grand_total_cells)
+
     with m4:
         st.metric("Somatic Cells/ml", f"{somatic_cells_per_ml:,.2f}")
 
     st.markdown("---")
-    st.subheader("📋 Combined Per-Class Breakdown")
+    st.subheader("Combined Per-Class Breakdown")
+
     combined_df = make_class_dataframe(combined_class_counts, grand_total_cells)
     st.dataframe(combined_df, use_container_width=True, hide_index=True)
 
     st.markdown("---")
-    st.subheader("➡️ Left to Right Group Summary")
+    st.subheader("Left to Right Group Summary")
 
     c1, c2 = st.columns(2)
+
     with c1:
         st.metric("Number of Processed Images", len(left_group_data["processed_results"]))
+
     with c2:
         st.metric("Total Cells Detected", total_left_cells)
 
     left_img_summary_df = make_image_summary_dataframe(left_group_data["processed_results"])
+
     if not left_img_summary_df.empty:
-        st.markdown("**Per-image total cells and saved path**")
+        st.markdown("**Per-image total cells**")
         st.dataframe(left_img_summary_df, use_container_width=True, hide_index=True)
 
     left_class_df = make_class_dataframe(
         left_group_data["group_class_counts"],
         total_left_cells
     )
+
     st.markdown("**Per-class breakdown**")
     st.dataframe(left_class_df, use_container_width=True, hide_index=True)
 
     st.markdown("---")
-    st.subheader("⬇️ Top to Bottom Group Summary")
+    st.subheader("Top to Bottom Group Summary")
 
     c3, c4 = st.columns(2)
+
     with c3:
         st.metric("Number of Processed Images", len(top_group_data["processed_results"]))
+
     with c4:
         st.metric("Total Cells Detected", total_top_cells)
 
     top_img_summary_df = make_image_summary_dataframe(top_group_data["processed_results"])
+
     if not top_img_summary_df.empty:
-        st.markdown("**Per-image total cells and saved path**")
+        st.markdown("**Per-image total cells**")
         st.dataframe(top_img_summary_df, use_container_width=True, hide_index=True)
 
     top_class_df = make_class_dataframe(
         top_group_data["group_class_counts"],
         total_top_cells
     )
+
     st.markdown("**Per-class breakdown**")
     st.dataframe(top_class_df, use_container_width=True, hide_index=True)
 
     st.markdown("---")
-    st.subheader("🧾 Combined Image-wise Summary")
+    st.subheader("Combined Image-wise Summary")
 
     combined_rows = []
 
@@ -533,8 +562,7 @@ if selected_left_files or selected_top_files:
             "S.No.": i,
             "Source Folder": result["source_folder_name"],
             "Image Name": result["filename"],
-            "Total Cells": result["total_cells"],
-            "Saved Path": result["saved_path"] if result["saved_path"] else "Not Saved"
+            "Total Cells": result["total_cells"]
         })
 
     for i, result in enumerate(top_group_data["processed_results"], start=1):
@@ -543,17 +571,17 @@ if selected_left_files or selected_top_files:
             "S.No.": i,
             "Source Folder": result["source_folder_name"],
             "Image Name": result["filename"],
-            "Total Cells": result["total_cells"],
-            "Saved Path": result["saved_path"] if result["saved_path"] else "Not Saved"
+            "Total Cells": result["total_cells"]
         })
 
     combined_image_summary_df = pd.DataFrame(combined_rows)
+
     if not combined_image_summary_df.empty:
         st.dataframe(combined_image_summary_df, use_container_width=True, hide_index=True)
 
     if left_group_data["processed_results"]:
         st.markdown("---")
-        st.subheader("🖼️ Left to Right Image Results")
+        st.subheader("Left to Right Image Results")
 
         for idx, result in enumerate(left_group_data["processed_results"], start=1):
             st.markdown(f"### Image {idx}: {result['filename']}")
@@ -570,7 +598,7 @@ if selected_left_files or selected_top_files:
             with col2:
                 st.image(
                     result["resized_rgb"],
-                    caption="Resized RGB (640×640)",
+                    caption="Resized RGB 640 x 640",
                     use_container_width=True
                 )
 
@@ -583,20 +611,20 @@ if selected_left_files or selected_top_files:
 
             st.write(f"**Source folder:** {result['source_folder_name']}")
             st.write(f"**Total cells in this image:** {result['total_cells']}")
-            st.write(f"**Saved prediction path:** {result['saved_path'] if result['saved_path'] else 'Not Saved'}")
 
             if result["detections_by_class"]:
                 per_img_df = make_class_dataframe(
                     result["detections_by_class"],
                     result["total_cells"]
                 )
+
                 st.dataframe(per_img_df, use_container_width=True, hide_index=True)
             else:
                 st.info("No cells detected in this image.")
 
     if top_group_data["processed_results"]:
         st.markdown("---")
-        st.subheader("🖼️ Top to Bottom Image Results")
+        st.subheader("Top to Bottom Image Results")
 
         for idx, result in enumerate(top_group_data["processed_results"], start=1):
             st.markdown(f"### Image {idx}: {result['filename']}")
@@ -613,7 +641,7 @@ if selected_left_files or selected_top_files:
             with col2:
                 st.image(
                     result["resized_rgb"],
-                    caption="Resized RGB (640×640)",
+                    caption="Resized RGB 640 x 640",
                     use_container_width=True
                 )
 
@@ -626,16 +654,16 @@ if selected_left_files or selected_top_files:
 
             st.write(f"**Source folder:** {result['source_folder_name']}")
             st.write(f"**Total cells in this image:** {result['total_cells']}")
-            st.write(f"**Saved prediction path:** {result['saved_path'] if result['saved_path'] else 'Not Saved'}")
 
             if result["detections_by_class"]:
                 per_img_df = make_class_dataframe(
                     result["detections_by_class"],
                     result["total_cells"]
                 )
+
                 st.dataframe(per_img_df, use_container_width=True, hide_index=True)
             else:
                 st.info("No cells detected in this image.")
 
 else:
-    st.info("👆 Please upload one or both image folders to get started.")
+    st.info("Please upload one or both image folders to get started.")
