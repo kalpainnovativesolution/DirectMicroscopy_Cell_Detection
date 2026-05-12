@@ -5,6 +5,7 @@ import pandas as pd
 import re
 import os
 import hashlib
+import gc
 from pathlib import Path
 from ultralytics import YOLO
 import gdown
@@ -19,7 +20,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("Cell Detection with YOLOv11")
+st.title("🔬 Cell Detection with YOLOv11")
 
 st.markdown(
     """
@@ -34,10 +35,6 @@ st.markdown(
 # Config Helpers
 # ---------------------------------------------------------------------
 def get_secret_value(key, default=""):
-    """
-    Safely read value from Streamlit secrets.
-    Works locally and on Streamlit Cloud.
-    """
     try:
         return st.secrets.get(key, default)
     except Exception:
@@ -76,13 +73,41 @@ iou_threshold = st.sidebar.slider(
     step=0.05
 )
 
-show_labels = st.sidebar.checkbox("Show Labels on App Display", value=True)
-show_conf = st.sidebar.checkbox("Show Confidence Scores on App Display", value=True)
+show_labels = st.sidebar.checkbox("Show Labels", value=True)
+show_conf = st.sidebar.checkbox("Show Confidence Scores", value=True)
 
 box_color = st.sidebar.color_picker("Bounding Box Color", "#00FF00")
 
-img_size = 640
-max_files_per_group = 25
+img_size = st.sidebar.selectbox(
+    "Inference Image Size",
+    options=[416, 512, 640],
+    index=1,
+    help="Lower size reduces memory usage on Streamlit Cloud."
+)
+
+max_files_per_group = st.sidebar.slider(
+    "Maximum images per folder",
+    min_value=5,
+    max_value=25,
+    value=25,
+    step=5
+)
+
+max_display_images = st.sidebar.slider(
+    "Maximum images to display per folder",
+    min_value=1,
+    max_value=10,
+    value=5,
+    step=1,
+    help="Only selected images are displayed to avoid cloud memory crash."
+)
+
+show_image_results = st.sidebar.checkbox(
+    "Show Image Results",
+    value=True,
+    help="Disable this if the app still crashes on Streamlit Cloud."
+)
+
 allowed_extensions = {"jpg", "jpeg", "png", "bmp", "tiff", "tif"}
 
 
@@ -91,104 +116,59 @@ allowed_extensions = {"jpg", "jpeg", "png", "bmp", "tiff", "tif"}
 # ---------------------------------------------------------------------
 @st.cache_resource(show_spinner=False)
 def download_and_load_model(drive_url):
-    """
-    Downloads YOLO model from Google Drive and loads it.
-    Compatible with both old and new versions of gdown.
-    """
-
-    # Validate input URL
     if not drive_url or not drive_url.strip():
         raise ValueError("Google Drive model link is missing.")
 
-    # Create model storage directory
     model_dir = Path("models")
     model_dir.mkdir(exist_ok=True)
 
-    # Generate a unique filename based on the URL
     url_hash = hashlib.md5(drive_url.encode()).hexdigest()[:10]
     model_path = model_dir / f"yolo_model_{url_hash}.pt"
 
-    # Download model only if it does not already exist
     if not model_path.exists() or model_path.stat().st_size == 0:
-
-        # Remove existing empty/corrupt file if present
         if model_path.exists():
-            try:
-                model_path.unlink()
-            except Exception:
-                pass
+            model_path.unlink()
 
-        # -------------------------------------------------------------
-        # Extract Google Drive File ID
-        # Example:
-        # https://drive.google.com/file/d/12wztvmmRL5BIo6U3on3GtKWQFQa36CpN/view?usp=sharing
-        # -> 12wztvmmRL5BIo6U3on3GtKWQFQa36CpN
-        # -------------------------------------------------------------
         match = re.search(r"/d/([a-zA-Z0-9_-]+)", drive_url)
 
         if match:
             file_id = match.group(1)
         else:
-            # Support URLs like:
-            # https://drive.google.com/open?id=FILE_ID
             match = re.search(r"id=([a-zA-Z0-9_-]+)", drive_url)
             if match:
                 file_id = match.group(1)
             else:
-                raise ValueError(
-                    "Invalid Google Drive link format. "
-                    "Please provide a valid public sharing link."
-                )
+                raise ValueError("Invalid Google Drive link format.")
 
-        # -------------------------------------------------------------
-        # Download using file ID (works with all gdown versions)
-        # -------------------------------------------------------------
         downloaded_file = gdown.download(
             id=file_id,
             output=str(model_path),
             quiet=False
         )
 
-        # Validate download
         if downloaded_file is None:
             raise RuntimeError(
-                "Model download failed. "
-                "Please ensure the Google Drive link is public "
-                "(Anyone with the link can view)."
+                "Model download failed. Make sure Google Drive sharing is public."
             )
 
         if not model_path.exists() or model_path.stat().st_size == 0:
-            raise RuntimeError(
-                "Downloaded model file is empty or corrupt."
-            )
+            raise RuntimeError("Downloaded model file is empty or corrupt.")
 
-    # -------------------------------------------------------------
-    # Load YOLO model
-    # -------------------------------------------------------------
     return YOLO(str(model_path))
 
 
-# ---------------------------------------------------------------------
-# Load Model
-# ---------------------------------------------------------------------
 try:
     with st.spinner("Loading YOLO model..."):
         model = download_and_load_model(model_drive_url)
-
-    st.sidebar.success("✅ Model loaded successfully.")
-
+    st.sidebar.success("Model loaded successfully.")
 except Exception as e:
-    st.sidebar.error(f"❌ Failed to load model: {e}")
+    st.sidebar.error(f"Failed to load model: {e}")
     st.stop()
 
 
 # ---------------------------------------------------------------------
 # Helper Functions
 # ---------------------------------------------------------------------
-def resize_image(image_np, size=(640, 640)):
-    return cv2.resize(image_np, size, interpolation=cv2.INTER_AREA)
-
-
 def natural_sort_key(text):
     return [
         int(part) if part.isdigit() else part.lower()
@@ -197,19 +177,10 @@ def natural_sort_key(text):
 
 
 def get_source_folder_name(file_path):
-    """
-    Extract top-level folder name from uploaded file path.
-    Example:
-    sampleA/img1.jpg -> sampleA
-    sampleA/sub/img1.jpg -> sampleA
-    img1.jpg -> root_folder
-    """
     normalized = file_path.replace("\\", "/").strip("/")
     parts = normalized.split("/")
-
     if len(parts) >= 2:
         return parts[0]
-
     return "root_folder"
 
 
@@ -217,7 +188,7 @@ def get_filename_only(file_path):
     return os.path.basename(file_path.replace("\\", "/"))
 
 
-def filter_and_select_first_25(uploaded_files, max_count=25):
+def filter_and_select_files(uploaded_files, max_count=25):
     valid_files = []
 
     for file in uploaded_files:
@@ -233,7 +204,6 @@ def filter_and_select_first_25(uploaded_files, max_count=25):
 
 def read_uploaded_image(uploaded_file):
     uploaded_file.seek(0)
-
     file_bytes = np.frombuffer(uploaded_file.read(), np.uint8)
     bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
@@ -244,7 +214,24 @@ def read_uploaded_image(uploaded_file):
     return rgb
 
 
-def draw_detections(image_np, results, box_hex, show_lbl=False, show_cf=False):
+def resize_for_inference(image_np, size):
+    return cv2.resize(image_np, (size, size), interpolation=cv2.INTER_AREA)
+
+
+def resize_for_display(image_np, max_width=700):
+    h, w = image_np.shape[:2]
+
+    if w <= max_width:
+        return image_np
+
+    scale = max_width / w
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+
+    return cv2.resize(image_np, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+
+def draw_detections(image_np, results, box_hex, show_lbl=True, show_cf=True):
     output = image_np.copy()
 
     hex_color = box_hex.lstrip("#")
@@ -261,11 +248,12 @@ def draw_detections(image_np, results, box_hex, show_lbl=False, show_cf=False):
             x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
             conf = float(box.conf[0])
             cls = int(box.cls[0])
-            label = names[cls]
+
+            label = names.get(cls, str(cls)) if isinstance(names, dict) else str(cls)
 
             detections_by_class[label] = detections_by_class.get(label, 0) + 1
 
-            cv2.rectangle(output, (x1, y1), (x2, y2), color_bgr, 2)
+            cv2.rectangle(output, (x1, y1), (x2, y2), color_bgr, 3)
 
             if show_lbl or show_cf:
                 text_parts = []
@@ -278,51 +266,51 @@ def draw_detections(image_np, results, box_hex, show_lbl=False, show_cf=False):
 
                 text = " ".join(text_parts)
 
-                if text.strip():
+                if text:
+                    font_scale = 0.7
+                    thickness = 2
+
                     (tw, th), _ = cv2.getTextSize(
                         text,
                         cv2.FONT_HERSHEY_SIMPLEX,
-                        0.55,
-                        1
+                        font_scale,
+                        thickness
                     )
 
-                    label_y1 = max(y1 - th - 8, 0)
-                    label_y2 = max(y1, th + 8)
+                    y_text_bg = max(y1 - th - 10, 0)
 
                     cv2.rectangle(
                         output,
-                        (x1, label_y1),
-                        (x1 + tw + 6, label_y2),
+                        (x1, y_text_bg),
+                        (x1 + tw + 8, y_text_bg + th + 8),
                         color_bgr,
                         -1
                     )
 
-                    text_y = max(y1 - 4, th + 2)
-
                     cv2.putText(
                         output,
                         text,
-                        (x1 + 2, text_y),
+                        (x1 + 4, y_text_bg + th + 3),
                         cv2.FONT_HERSHEY_SIMPLEX,
-                        0.55,
+                        font_scale,
                         (255, 255, 255),
-                        1,
+                        thickness,
                         cv2.LINE_AA
                     )
 
     return output, detections_by_class
 
 
-def process_single_image(uploaded_file):
-    raw_original_rgb = read_uploaded_image(uploaded_file)
+def process_single_image(uploaded_file, keep_image=False):
+    original_rgb = read_uploaded_image(uploaded_file)
 
-    if raw_original_rgb is None:
+    if original_rgb is None:
         return None
 
-    source_folder_name = get_source_folder_name(uploaded_file.name)
-    image_name_only = get_filename_only(uploaded_file.name)
+    filename = get_filename_only(uploaded_file.name)
+    source_folder = get_source_folder_name(uploaded_file.name)
 
-    resized_rgb = resize_image(raw_original_rgb, size=(img_size, img_size))
+    resized_rgb = resize_for_inference(original_rgb, img_size)
 
     results = model.predict(
         source=resized_rgb,
@@ -332,7 +320,7 @@ def process_single_image(uploaded_file):
         verbose=False
     )
 
-    display_image, detections_by_class = draw_detections(
+    detected_image, detections_by_class = draw_detections(
         resized_rgb,
         results,
         box_color,
@@ -342,38 +330,75 @@ def process_single_image(uploaded_file):
 
     total_cells = sum(detections_by_class.values())
 
-    return {
-        "filename": image_name_only,
-        "original_uploaded_path": uploaded_file.name,
-        "source_folder_name": source_folder_name,
-        "raw_original_rgb": raw_original_rgb,
-        "resized_rgb": resized_rgb,
-        "display_image": display_image,
+    data = {
+        "filename": filename,
+        "source_folder_name": source_folder,
         "detections_by_class": detections_by_class,
-        "total_cells": total_cells
+        "total_cells": total_cells,
+        "original_display": None,
+        "detected_display": None
     }
+
+    if keep_image:
+        data["original_display"] = resize_for_display(original_rgb, max_width=700)
+        data["detected_display"] = resize_for_display(detected_image, max_width=700)
+
+    del original_rgb
+    del resized_rgb
+    del detected_image
+    del results
+    gc.collect()
+
+    return data
 
 
 def process_image_group(uploaded_files, group_name):
     processed_results = []
+    display_results = []
     group_class_counts = {}
     group_total_cells = 0
 
-    for uploaded_file in uploaded_files:
-        result = process_single_image(uploaded_file)
+    progress = st.progress(0)
+    status = st.empty()
+
+    total_files = len(uploaded_files)
+
+    for idx, uploaded_file in enumerate(uploaded_files, start=1):
+        status.write(f"Processing {group_name}: {idx}/{total_files} - {get_filename_only(uploaded_file.name)}")
+
+        keep_image = show_image_results and len(display_results) < max_display_images
+
+        result = process_single_image(uploaded_file, keep_image=keep_image)
 
         if result is None:
             continue
 
-        processed_results.append(result)
+        summary_result = {
+            "filename": result["filename"],
+            "source_folder_name": result["source_folder_name"],
+            "detections_by_class": result["detections_by_class"],
+            "total_cells": result["total_cells"]
+        }
+
+        processed_results.append(summary_result)
+
+        if keep_image:
+            display_results.append(result)
+
         group_total_cells += result["total_cells"]
 
         for cls_name, count in result["detections_by_class"].items():
             group_class_counts[cls_name] = group_class_counts.get(cls_name, 0) + count
 
+        progress.progress(idx / total_files)
+
+    status.empty()
+    progress.empty()
+
     return {
         "group_name": group_name,
         "processed_results": processed_results,
+        "display_results": display_results,
         "group_class_counts": group_class_counts,
         "group_total_cells": group_total_cells
     }
@@ -412,44 +437,34 @@ def make_image_summary_dataframe(processed_results):
 st.markdown("---")
 st.subheader("Upload Image Folders")
 
-st.caption(
-    "Choose folders here. The app will sort images by filename and process "
-    "only the first 25 images from each folder."
-)
-
 left_to_right_files = st.file_uploader(
     "Select left to right images folder",
     type=list(allowed_extensions),
     accept_multiple_files="directory",
-    key="left_to_right_folder_uploader",
-    help="Select a folder. The app will sort images by filename and use the first 25 images."
+    key="left_to_right_folder_uploader"
 )
 
 top_to_bottom_files = st.file_uploader(
     "Select top to bottom images folder",
     type=list(allowed_extensions),
     accept_multiple_files="directory",
-    key="top_to_bottom_folder_uploader",
-    help="Select a folder. The app will sort images by filename and use the first 25 images."
+    key="top_to_bottom_folder_uploader"
 )
 
 
-# ---------------------------------------------------------------------
-# Select First 25 Automatically
-# ---------------------------------------------------------------------
 selected_left_files = []
 selected_top_files = []
 total_left_uploaded_valid = 0
 total_top_uploaded_valid = 0
 
 if left_to_right_files:
-    selected_left_files, total_left_uploaded_valid = filter_and_select_first_25(
+    selected_left_files, total_left_uploaded_valid = filter_and_select_files(
         left_to_right_files,
         max_files_per_group
     )
 
 if top_to_bottom_files:
-    selected_top_files, total_top_uploaded_valid = filter_and_select_first_25(
+    selected_top_files, total_top_uploaded_valid = filter_and_select_files(
         top_to_bottom_files,
         max_files_per_group
     )
@@ -470,17 +485,7 @@ if left_to_right_files or top_to_bottom_files:
         st.write(f"Images selected for processing: {len(selected_left_files)}")
 
         if selected_left_files:
-            left_folder_name = get_source_folder_name(selected_left_files[0].name)
-            st.write(f"**Source folder name:** {left_folder_name}")
-
-        if total_left_uploaded_valid > max_files_per_group:
-            st.info(
-                f"Only the first {max_files_per_group} images after filename sorting are being processed."
-            )
-
-        if selected_left_files:
-            st.write("**Selected filenames:**")
-            st.write([get_filename_only(file.name) for file in selected_left_files])
+            st.write(f"Source folder: {get_source_folder_name(selected_left_files[0].name)}")
 
     with col_b:
         st.write("**Top to Bottom Folder**")
@@ -488,17 +493,7 @@ if left_to_right_files or top_to_bottom_files:
         st.write(f"Images selected for processing: {len(selected_top_files)}")
 
         if selected_top_files:
-            top_folder_name = get_source_folder_name(selected_top_files[0].name)
-            st.write(f"**Source folder name:** {top_folder_name}")
-
-        if total_top_uploaded_valid > max_files_per_group:
-            st.info(
-                f"Only the first {max_files_per_group} images after filename sorting are being processed."
-            )
-
-        if selected_top_files:
-            st.write("**Selected filenames:**")
-            st.write([get_filename_only(file.name) for file in selected_top_files])
+            st.write(f"Source folder: {get_source_folder_name(selected_top_files[0].name)}")
 
 
 # ---------------------------------------------------------------------
@@ -506,219 +501,198 @@ if left_to_right_files or top_to_bottom_files:
 # ---------------------------------------------------------------------
 if selected_left_files or selected_top_files:
 
-    with st.spinner("Running inference on selected images..."):
-        left_group_data = process_image_group(
-            selected_left_files,
-            "Left to Right"
+    run_detection = st.button("Run Detection", type="primary")
+
+    if run_detection:
+        with st.spinner("Running inference..."):
+            left_group_data = process_image_group(
+                selected_left_files,
+                "Left to Right"
+            )
+
+            top_group_data = process_image_group(
+                selected_top_files,
+                "Top to Bottom"
+            )
+
+        total_left_cells = left_group_data["group_total_cells"]
+        total_top_cells = top_group_data["group_total_cells"]
+        grand_total_cells = total_left_cells + total_top_cells
+
+        somatic_cells_per_ml = (grand_total_cells / 50) * 333300
+
+        combined_class_counts = {}
+
+        for cls_name, count in left_group_data["group_class_counts"].items():
+            combined_class_counts[cls_name] = combined_class_counts.get(cls_name, 0) + count
+
+        for cls_name, count in top_group_data["group_class_counts"].items():
+            combined_class_counts[cls_name] = combined_class_counts.get(cls_name, 0) + count
+
+        st.markdown("---")
+        st.subheader("Final Summation")
+
+        m1, m2, m3, m4 = st.columns(4)
+
+        with m1:
+            st.metric("Left to Right Total Cells", total_left_cells)
+
+        with m2:
+            st.metric("Top to Bottom Total Cells", total_top_cells)
+
+        with m3:
+            st.metric("Combined Total Cells", grand_total_cells)
+
+        with m4:
+            st.metric("Somatic Cells/ml", f"{somatic_cells_per_ml:,.2f}")
+
+        st.markdown("---")
+        st.subheader("Combined Per-Class Breakdown")
+
+        combined_df = make_class_dataframe(combined_class_counts, grand_total_cells)
+        st.dataframe(combined_df, use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+        st.subheader("Left to Right Group Summary")
+
+        left_img_summary_df = make_image_summary_dataframe(
+            left_group_data["processed_results"]
         )
 
-        top_group_data = process_image_group(
-            selected_top_files,
-            "Top to Bottom"
-        )
-
-    total_left_cells = left_group_data["group_total_cells"]
-    total_top_cells = top_group_data["group_total_cells"]
-    grand_total_cells = total_left_cells + total_top_cells
-
-    # Somatic Cells/ml formula:
-    # (Combined Total Cells / 50) * 333300
-    somatic_cells_per_ml = (grand_total_cells / 50) * 333300
-
-    combined_class_counts = {}
-
-    for cls_name, count in left_group_data["group_class_counts"].items():
-        combined_class_counts[cls_name] = combined_class_counts.get(cls_name, 0) + count
-
-    for cls_name, count in top_group_data["group_class_counts"].items():
-        combined_class_counts[cls_name] = combined_class_counts.get(cls_name, 0) + count
-
-    st.markdown("---")
-    st.subheader("Final Summation")
-
-    m1, m2, m3, m4 = st.columns(4)
-
-    with m1:
-        st.metric("Left to Right Total Cells", total_left_cells)
-
-    with m2:
-        st.metric("Top to Bottom Total Cells", total_top_cells)
-
-    with m3:
-        st.metric("Combined Total Cells", grand_total_cells)
-
-    with m4:
-        st.metric("Somatic Cells/ml", f"{somatic_cells_per_ml:,.2f}")
-
-    st.markdown("---")
-    st.subheader("Combined Per-Class Breakdown")
-
-    combined_df = make_class_dataframe(combined_class_counts, grand_total_cells)
-    st.dataframe(combined_df, use_container_width=True, hide_index=True)
-
-    st.markdown("---")
-    st.subheader("Left to Right Group Summary")
-
-    c1, c2 = st.columns(2)
-
-    with c1:
-        st.metric("Number of Processed Images", len(left_group_data["processed_results"]))
-
-    with c2:
+        st.metric("Processed Images", len(left_group_data["processed_results"]))
         st.metric("Total Cells Detected", total_left_cells)
 
-    left_img_summary_df = make_image_summary_dataframe(left_group_data["processed_results"])
+        if not left_img_summary_df.empty:
+            st.dataframe(left_img_summary_df, use_container_width=True, hide_index=True)
 
-    if not left_img_summary_df.empty:
-        st.markdown("**Per-image total cells**")
-        st.dataframe(left_img_summary_df, use_container_width=True, hide_index=True)
+        left_class_df = make_class_dataframe(
+            left_group_data["group_class_counts"],
+            total_left_cells
+        )
 
-    left_class_df = make_class_dataframe(
-        left_group_data["group_class_counts"],
-        total_left_cells
-    )
+        st.markdown("**Per-class breakdown**")
+        st.dataframe(left_class_df, use_container_width=True, hide_index=True)
 
-    st.markdown("**Per-class breakdown**")
-    st.dataframe(left_class_df, use_container_width=True, hide_index=True)
+        st.markdown("---")
+        st.subheader("Top to Bottom Group Summary")
 
-    st.markdown("---")
-    st.subheader("Top to Bottom Group Summary")
+        top_img_summary_df = make_image_summary_dataframe(
+            top_group_data["processed_results"]
+        )
 
-    c3, c4 = st.columns(2)
-
-    with c3:
-        st.metric("Number of Processed Images", len(top_group_data["processed_results"]))
-
-    with c4:
+        st.metric("Processed Images", len(top_group_data["processed_results"]))
         st.metric("Total Cells Detected", total_top_cells)
 
-    top_img_summary_df = make_image_summary_dataframe(top_group_data["processed_results"])
+        if not top_img_summary_df.empty:
+            st.dataframe(top_img_summary_df, use_container_width=True, hide_index=True)
 
-    if not top_img_summary_df.empty:
-        st.markdown("**Per-image total cells**")
-        st.dataframe(top_img_summary_df, use_container_width=True, hide_index=True)
+        top_class_df = make_class_dataframe(
+            top_group_data["group_class_counts"],
+            total_top_cells
+        )
 
-    top_class_df = make_class_dataframe(
-        top_group_data["group_class_counts"],
-        total_top_cells
-    )
+        st.markdown("**Per-class breakdown**")
+        st.dataframe(top_class_df, use_container_width=True, hide_index=True)
 
-    st.markdown("**Per-class breakdown**")
-    st.dataframe(top_class_df, use_container_width=True, hide_index=True)
-
-    st.markdown("---")
-    st.subheader("Combined Image-wise Summary")
-
-    combined_rows = []
-
-    for i, result in enumerate(left_group_data["processed_results"], start=1):
-        combined_rows.append({
-            "Group": "Left to Right",
-            "S.No.": i,
-            "Source Folder": result["source_folder_name"],
-            "Image Name": result["filename"],
-            "Total Cells": result["total_cells"]
-        })
-
-    for i, result in enumerate(top_group_data["processed_results"], start=1):
-        combined_rows.append({
-            "Group": "Top to Bottom",
-            "S.No.": i,
-            "Source Folder": result["source_folder_name"],
-            "Image Name": result["filename"],
-            "Total Cells": result["total_cells"]
-        })
-
-    combined_image_summary_df = pd.DataFrame(combined_rows)
-
-    if not combined_image_summary_df.empty:
-        st.dataframe(combined_image_summary_df, use_container_width=True, hide_index=True)
-
-    if left_group_data["processed_results"]:
         st.markdown("---")
-        st.subheader("Left to Right Image Results")
+        st.subheader("Combined Image-wise Summary")
 
-        for idx, result in enumerate(left_group_data["processed_results"], start=1):
-            st.markdown(f"### Image {idx}: {result['filename']}")
+        combined_rows = []
 
-            col1, col2, col3 = st.columns(3)
+        for i, result in enumerate(left_group_data["processed_results"], start=1):
+            combined_rows.append({
+                "Group": "Left to Right",
+                "S.No.": i,
+                "Source Folder": result["source_folder_name"],
+                "Image Name": result["filename"],
+                "Total Cells": result["total_cells"]
+            })
 
-            with col1:
-                st.image(
-                    result["raw_original_rgb"],
-                    caption=f"Original RGB - {result['filename']}",
-                    use_container_width=True
-                )
+        for i, result in enumerate(top_group_data["processed_results"], start=1):
+            combined_rows.append({
+                "Group": "Top to Bottom",
+                "S.No.": i,
+                "Source Folder": result["source_folder_name"],
+                "Image Name": result["filename"],
+                "Total Cells": result["total_cells"]
+            })
 
-            with col2:
-                st.image(
-                    result["resized_rgb"],
-                    caption="Resized RGB 640 x 640",
-                    use_container_width=True
-                )
+        combined_image_summary_df = pd.DataFrame(combined_rows)
 
-            with col3:
-                st.image(
-                    result["display_image"],
-                    caption=f"Detected Cells: {result['total_cells']}",
-                    use_container_width=True
-                )
+        if not combined_image_summary_df.empty:
+            st.dataframe(combined_image_summary_df, use_container_width=True, hide_index=True)
 
-            st.write(f"**Source folder:** {result['source_folder_name']}")
-            st.write(f"**Total cells in this image:** {result['total_cells']}")
+        if show_image_results:
+            st.markdown("---")
+            st.subheader("Displayed Image Results")
 
-            if result["detections_by_class"]:
-                per_img_df = make_class_dataframe(
-                    result["detections_by_class"],
-                    result["total_cells"]
-                )
+            st.info(
+                f"To avoid Streamlit Cloud memory crash, only first {max_display_images} images per folder are displayed."
+            )
 
-                st.dataframe(per_img_df, use_container_width=True, hide_index=True)
-            else:
-                st.info("No cells detected in this image.")
+            if left_group_data["display_results"]:
+                st.markdown("### Left to Right Display Results")
 
-    if top_group_data["processed_results"]:
-        st.markdown("---")
-        st.subheader("Top to Bottom Image Results")
+                for idx, result in enumerate(left_group_data["display_results"], start=1):
+                    st.markdown(f"#### Image {idx}: {result['filename']}")
 
-        for idx, result in enumerate(top_group_data["processed_results"], start=1):
-            st.markdown(f"### Image {idx}: {result['filename']}")
+                    col1, col2 = st.columns(2)
 
-            col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.image(
+                            result["original_display"],
+                            caption=f"Original - {result['filename']}",
+                            use_container_width=True
+                        )
 
-            with col1:
-                st.image(
-                    result["raw_original_rgb"],
-                    caption=f"Original RGB - {result['filename']}",
-                    use_container_width=True
-                )
+                    with col2:
+                        st.image(
+                            result["detected_display"],
+                            caption=f"Detected Cells: {result['total_cells']}",
+                            use_container_width=True
+                        )
 
-            with col2:
-                st.image(
-                    result["resized_rgb"],
-                    caption="Resized RGB 640 x 640",
-                    use_container_width=True
-                )
+                    if result["detections_by_class"]:
+                        per_img_df = make_class_dataframe(
+                            result["detections_by_class"],
+                            result["total_cells"]
+                        )
+                        st.dataframe(per_img_df, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No cells detected in this image.")
 
-            with col3:
-                st.image(
-                    result["display_image"],
-                    caption=f"Detected Cells: {result['total_cells']}",
-                    use_container_width=True
-                )
+            if top_group_data["display_results"]:
+                st.markdown("### Top to Bottom Display Results")
 
-            st.write(f"**Source folder:** {result['source_folder_name']}")
-            st.write(f"**Total cells in this image:** {result['total_cells']}")
+                for idx, result in enumerate(top_group_data["display_results"], start=1):
+                    st.markdown(f"#### Image {idx}: {result['filename']}")
 
-            if result["detections_by_class"]:
-                per_img_df = make_class_dataframe(
-                    result["detections_by_class"],
-                    result["total_cells"]
-                )
+                    col1, col2 = st.columns(2)
 
-                st.dataframe(per_img_df, use_container_width=True, hide_index=True)
-            else:
-                st.info("No cells detected in this image.")
+                    with col1:
+                        st.image(
+                            result["original_display"],
+                            caption=f"Original - {result['filename']}",
+                            use_container_width=True
+                        )
+
+                    with col2:
+                        st.image(
+                            result["detected_display"],
+                            caption=f"Detected Cells: {result['total_cells']}",
+                            use_container_width=True
+                        )
+
+                    if result["detections_by_class"]:
+                        per_img_df = make_class_dataframe(
+                            result["detections_by_class"],
+                            result["total_cells"]
+                        )
+                        st.dataframe(per_img_df, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No cells detected in this image.")
+
+        gc.collect()
 
 else:
     st.info("Please upload one or both image folders to get started.")
