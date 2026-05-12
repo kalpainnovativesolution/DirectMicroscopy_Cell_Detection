@@ -93,40 +93,92 @@ allowed_extensions = {"jpg", "jpeg", "png", "bmp", "tiff", "tif"}
 def download_and_load_model(drive_url):
     """
     Downloads YOLO model from Google Drive and loads it.
-    The downloaded model is cached by Streamlit.
+    Compatible with both old and new versions of gdown.
     """
 
+    # Validate input URL
     if not drive_url or not drive_url.strip():
         raise ValueError("Google Drive model link is missing.")
 
+    # Create model storage directory
     model_dir = Path("models")
     model_dir.mkdir(exist_ok=True)
 
+    # Generate a unique filename based on the URL
     url_hash = hashlib.md5(drive_url.encode()).hexdigest()[:10]
     model_path = model_dir / f"yolo_model_{url_hash}.pt"
 
+    # Download model only if it does not already exist
     if not model_path.exists() or model_path.stat().st_size == 0:
+
+        # Remove existing empty/corrupt file if present
+        if model_path.exists():
+            try:
+                model_path.unlink()
+            except Exception:
+                pass
+
+        # -------------------------------------------------------------
+        # Extract Google Drive File ID
+        # Example:
+        # https://drive.google.com/file/d/12wztvmmRL5BIo6U3on3GtKWQFQa36CpN/view?usp=sharing
+        # -> 12wztvmmRL5BIo6U3on3GtKWQFQa36CpN
+        # -------------------------------------------------------------
+        match = re.search(r"/d/([a-zA-Z0-9_-]+)", drive_url)
+
+        if match:
+            file_id = match.group(1)
+        else:
+            # Support URLs like:
+            # https://drive.google.com/open?id=FILE_ID
+            match = re.search(r"id=([a-zA-Z0-9_-]+)", drive_url)
+            if match:
+                file_id = match.group(1)
+            else:
+                raise ValueError(
+                    "Invalid Google Drive link format. "
+                    "Please provide a valid public sharing link."
+                )
+
+        # -------------------------------------------------------------
+        # Download using file ID (works with all gdown versions)
+        # -------------------------------------------------------------
         downloaded_file = gdown.download(
-            url=drive_url,
+            id=file_id,
             output=str(model_path),
-            quiet=False,
-            fuzzy=True
+            quiet=False
         )
 
-        if downloaded_file is None or not model_path.exists():
+        # Validate download
+        if downloaded_file is None:
             raise RuntimeError(
-                "Model download failed. Please check whether the Google Drive link is public."
+                "Model download failed. "
+                "Please ensure the Google Drive link is public "
+                "(Anyone with the link can view)."
             )
 
+        if not model_path.exists() or model_path.stat().st_size == 0:
+            raise RuntimeError(
+                "Downloaded model file is empty or corrupt."
+            )
+
+    # -------------------------------------------------------------
+    # Load YOLO model
+    # -------------------------------------------------------------
     return YOLO(str(model_path))
 
 
+# ---------------------------------------------------------------------
+# Load Model
+# ---------------------------------------------------------------------
 try:
     with st.spinner("Loading YOLO model..."):
         model = download_and_load_model(model_drive_url)
-    st.sidebar.success("Model loaded successfully.")
+
+    st.sidebar.success("✅ Model loaded successfully.")
+
 except Exception as e:
-    st.sidebar.error(f"Failed to load model: {e}")
+    st.sidebar.error(f"❌ Failed to load model: {e}")
     st.stop()
 
 
