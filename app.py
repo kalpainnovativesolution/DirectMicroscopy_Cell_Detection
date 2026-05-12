@@ -64,7 +64,7 @@ conf_threshold = st.sidebar.slider(
     "Confidence Threshold",
     min_value=0.1,
     max_value=1.0,
-    value=0.25,
+    value=0.30,
     step=0.05
 )
 
